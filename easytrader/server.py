@@ -1,4 +1,6 @@
 import functools
+import hmac
+import os
 
 from flask import Flask, jsonify, request
 
@@ -8,6 +10,31 @@ from .log import logger
 app = Flask(__name__)
 
 global_store = {}
+
+# 可选鉴权：设置环境变量 EASYTRADER_TOKEN 后，所有接口都需要携带
+# X-Auth-Token: <token> 或 Authorization: Bearer <token>
+AUTH_TOKEN = os.environ.get("EASYTRADER_TOKEN", "")
+
+
+def _get_request_token():
+    token = request.headers.get("X-Auth-Token", "")
+    if token:
+        return token
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[len("Bearer "):]
+    return ""
+
+
+@app.before_request
+def check_auth():
+    if not AUTH_TOKEN:
+        return None
+    if not hmac.compare_digest(
+        _get_request_token().encode("utf-8"), AUTH_TOKEN.encode("utf-8")
+    ):
+        return jsonify({"error": "unauthorized"}), 401
+    return None
 
 
 def error_handle(func):
@@ -148,5 +175,11 @@ def get_exit():
     return jsonify({"msg": "exit success"}), 200
 
 
-def run(port=1430):
-    app.run(host="0.0.0.0", port=port)
+def run(port=1430, host=None):
+    host = host or os.environ.get("EASYTRADER_HOST", "127.0.0.1")
+    if not AUTH_TOKEN:
+        logger.warning(
+            "未设置 EASYTRADER_TOKEN，接口无鉴权；当前监听 %s:%s", host, port
+        )
+    # pywinauto 操作的是同一个客户端窗口，必须串行处理请求
+    app.run(host=host, port=port, threaded=False)

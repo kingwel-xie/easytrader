@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import abc
 import io
+import os
 import tempfile
 from io import StringIO
 from typing import TYPE_CHECKING, Dict, List, Optional
@@ -17,6 +18,11 @@ from easytrader.utils.win_gui import SetForegroundWindow, ShowWindow, win32defin
 if TYPE_CHECKING:
     # pylint: disable=unused-import
     from easytrader import clienttrader
+
+
+def _remove_unnamed_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """去掉客户端导出内容末尾制表符产生的空列（Unnamed: N）。"""
+    return df.loc[:, ~df.columns.astype(str).str.startswith("Unnamed:")]
 
 
 class IGridStrategy(abc.ABC):
@@ -90,7 +96,7 @@ class Copy(BaseStrategy):
                 dtype=self._trader.config.GRID_DTYPE,
                 na_filter=False,
             )
-            return df.to_dict("records")
+            return _remove_unnamed_columns(df).to_dict("records")
         except:
             Copy._need_captcha_reg = True
 
@@ -188,20 +194,27 @@ class Xls(BaseStrategy):
             self._trader.wait(0.2)
             count -= 1
 
-        temp_path = tempfile.mktemp(suffix=".xls", dir=self.tmp_folder)
-        self._set_foreground(self._trader.app.top_window())
+        fd, temp_path = tempfile.mkstemp(suffix=".xls", dir=self.tmp_folder)
+        os.close(fd)
+        try:
+            self._set_foreground(self._trader.app.top_window())
 
-        # alt+s保存，alt+y替换已存在的文件
-        self._trader.app.top_window().Edit1.set_edit_text(temp_path)
-        self._trader.wait(0.1)
-        self._trader.app.top_window().type_keys("%{s}%{y}", set_foreground=False)
-        # Wait until file save complete otherwise pandas can not find file
-        self._trader.wait(0.2)
-        if self._trader.is_exist_pop_dialog():
-            self._trader.app.top_window().Button2.click()
+            # alt+s保存，alt+y替换已存在的文件
+            self._trader.app.top_window().Edit1.set_edit_text(temp_path)
+            self._trader.wait(0.1)
+            self._trader.app.top_window().type_keys("%{s}%{y}", set_foreground=False)
+            # Wait until file save complete otherwise pandas can not find file
             self._trader.wait(0.2)
+            if self._trader.is_exist_pop_dialog():
+                self._trader.app.top_window().Button2.click()
+                self._trader.wait(0.2)
 
-        return self._format_grid_data(temp_path)
+            return self._format_grid_data(temp_path)
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
     def _format_grid_data(self, data: str) -> List[Dict]:
         with open(data, encoding="gbk", errors="replace") as f:
@@ -213,4 +226,4 @@ class Xls(BaseStrategy):
             dtype=self._trader.config.GRID_DTYPE,
             na_filter=False,
         )
-        return df.to_dict("records")
+        return _remove_unnamed_columns(df).to_dict("records")

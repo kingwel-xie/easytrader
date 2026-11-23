@@ -1,18 +1,23 @@
 # -*- coding: utf-8 -*-
+import os
+
 import requests
 
 from easytrader.utils.misc import file2dict
 
 
-def use(broker, host, port=1430, **kwargs):
-    return RemoteClient(broker, host, port)
+def use(broker, host, port=1430, token=None, **kwargs):
+    return RemoteClient(broker, host, port, token=token, **kwargs)
 
 
 class RemoteClient:
-    def __init__(self, broker, host, port=1430, **kwargs):
+    def __init__(self, broker, host, port=1430, token=None, **kwargs):
         self._s = requests.session()
         self._api = "http://{}:{}".format(host, port)
         self._broker = broker
+        token = token or os.environ.get("EASYTRADER_TOKEN")
+        if token:
+            self._s.headers.update({"X-Auth-Token": token})
 
     def prepare(
         self,
@@ -40,6 +45,8 @@ class RemoteClient:
             account = file2dict(config_path)
             params["user"] = account["user"]
             params["password"] = account["password"]
+            params["comm_password"] = account.get("comm_password")
+            params["exe_path"] = account.get("exe_path")
 
         params["broker"] = self._broker
 
@@ -63,6 +70,14 @@ class RemoteClient:
     @property
     def today_trades(self):
         return self.common_get("today_trades")
+
+    @property
+    def history_entrusts(self):
+        return self.common_get("history_entrusts")
+
+    @property
+    def history_trades(self):
+        return self.common_get("history_trades")
 
     @property
     def cancel_entrusts(self):

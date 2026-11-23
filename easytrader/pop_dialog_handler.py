@@ -89,7 +89,9 @@ class TradePopDialogHandler(PopDialogHandler):
                 self._submit_by_shortcut()
                 return None
 
-            return None
+            # 未识别的提示信息也要确认关闭，否则会一直阻塞后续操作
+            self._submit_by_click()
+            return {"message": content}
 
         if title == "提示":
             content = self._extract_content_edit()

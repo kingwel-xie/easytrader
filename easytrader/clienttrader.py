@@ -11,9 +11,9 @@ from typing import Type, Union
 import hashlib, binascii
 
 import easyutils
-from pywinauto import findwindows, timings
+from pywinauto import findwindows, timings, win32defines
 
-from easytrader import grid_strategies, pop_dialog_handler, refresh_strategies
+from easytrader import exceptions, grid_strategies, pop_dialog_handler, refresh_strategies
 from easytrader.config import client
 from easytrader.grid_strategies import IGridStrategy
 from easytrader.log import logger
@@ -165,6 +165,7 @@ class ClientTrader(IClientTrader):
 
         return self._get_grid_data(self._config.COMMON_GRID_CONTROL_ID)
 
+    @property
     def history_trades(self):
         self._switch_left_menus(["查询[F4]", "历史成交"])
 
@@ -385,18 +386,8 @@ class ClientTrader(IClientTrader):
 
     @perf_clock
     def close_pop_dialog(self):
-        try:
-            if self._main.wrapper_object() != self._app.top_window().wrapper_object():
-                w = self._app.top_window()
-                if w is not None:
-                    w.close()
-                    self.wait(0.2)
-        except (
-                findwindows.ElementNotFoundError,
-                timings.TimeoutError,
-                RuntimeError,
-        ) as ex:
-            pass
+        # 关闭登录后可能弹出的通知/导航等模态窗口
+        self._close_prompt_windows_once()
 
     def _run_exe_path(self, exe_path):
         return os.path.join(os.path.dirname(exe_path), "xiadan.exe")
@@ -407,20 +398,83 @@ class ClientTrader(IClientTrader):
     def exit(self):
         self._app.kill()
 
-    def _close_prompt_windows(self):
+    @staticmethod
+    def _is_login_or_connecting_dialog(window):
+        """登录窗口和“正在连接委托主站...”进度窗不能关闭。"""
+        try:
+            title = window.window_text() or ""
+        except Exception:
+            title = ""
+        if "登录" in title:
+            return True
+        try:
+            content = (
+                window.child_window(control_id=1004, class_name="Edit").window_text()
+                or ""
+            )
+        except Exception:
+            content = ""
+        return "正在连接" in content
+
+    def _safe_close_window(self, window):
+        """
+        关闭弹窗时优先发送 WM_CLOSE。
+
+        部分模态窗口（如登录后的“导航”窗口）会让 pywinauto 的 close() 一直等待
+        窗口消失，从而阻塞 prepare，因此这里不直接调用 close()。
+        """
+        try:
+            window.post_message(win32defines.WM_CLOSE)
+        except Exception as ex:
+            logger.warning("发送关闭消息失败: %s", ex)
+
+    def _close_prompt_windows_once(self):
+        try:
+            windows = self._app.windows(class_name="#32770", visible_only=True)
+        except (findwindows.ElementNotFoundError, RuntimeError):
+            return
+
+        closed = 0
+        for window in windows:
+            try:
+                title = window.window_text()
+                if title == self._config.TITLE:
+                    continue
+                if self._is_login_or_connecting_dialog(window):
+                    continue
+                logger.info("关闭登录弹窗: %s", title or "<无标题>")
+                self._safe_close_window(window)
+                closed += 1
+            except (
+                findwindows.ElementNotFoundError,
+                timings.TimeoutError,
+                RuntimeError,
+            ):
+                continue
+        if closed:
+            self.wait(0.2)
+        return closed
+
+    def _close_prompt_windows(self, watch_seconds=0):
+        """
+        关闭登录提示窗口。
+
+        :param watch_seconds: 关闭当前弹窗后继续观察的秒数，用于处理延迟弹出的
+            通知/导航窗口（新版华泰客户端登录后约 3 秒才弹出）
+        """
         self.wait(1)
-        for window in self._app.windows(class_name="#32770", visible_only=True):
-            title = window.window_text()
-            if title != self._config.TITLE:
-                logging.info("close " + title)
-                window.close()
-                self.wait(0.2)
+        deadline = time.time() + watch_seconds
+        while True:
+            self._close_prompt_windows_once()
+            if time.time() >= deadline:
+                break
+            self.wait(0.5)
         self.wait(1)
 
     def close_pormpt_window_no_wait(self):
         for window in self._app.windows(class_name="#32770"):
             if window.window_text() != self._config.TITLE:
-                window.close()
+                self._safe_close_window(window)
 
     def trade(self, security, price, amount):
         self._set_trade_params(security, price, amount)
@@ -578,8 +632,16 @@ class ClientTrader(IClientTrader):
     @perf_clock
     def _handle_pop_dialogs(self, handler_class=pop_dialog_handler.PopDialogHandler):
         handler = handler_class(self._app)
+        max_retry = 20
+        retry = 0
 
         while self.is_exist_pop_dialog():
+            if retry >= max_retry:
+                raise exceptions.TradeError(
+                    "弹窗处理超过最大重试次数，可能存在无法关闭的弹窗"
+                )
+            retry += 1
+
             try:
                 title = self._get_pop_dialog_title()
             except pywinauto.findwindows.ElementNotFoundError:
@@ -628,4 +690,6 @@ class BaseLoginClientTrader(ClientTrader):
             comm_password,
             **kwargs
         )
+        # 登录后可能残留通知/导航弹窗，初始化工具栏前再清理一次
+        self._close_prompt_windows_once()
         self._init_toolbar()
