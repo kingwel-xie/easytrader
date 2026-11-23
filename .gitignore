@@ -24,6 +24,8 @@ account.session
 # Distribution / packaging
 .Python
 env/
+venv/
+.venv/
 build/
 develop-eggs/
 dist/
